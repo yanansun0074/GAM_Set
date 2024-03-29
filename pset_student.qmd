@@ -1,0 +1,217 @@
+---
+title: "GAM Pset"
+format: html
+editor: visual
+---
+
+## GAM refresher problem set
+
+Welcome! This is our first (and possibly only!) problem set of the semester. We want to give you a chance to practice using GAMs for storytelling in a slightly more controlled environment.
+
+### Library
+
+Here we're going to be seeing whether there's a story to tell about over time salaries in Baltimore over time.
+
+We read in two datasets. One, D_salaries, is a dataset of city salaries by department, by year, and by position. The second, D_budget, is a dataset of the city budget. We're only asking you to use this second set as a covariate in the model you'll eventually build, but feel free to explore it more, if you're interested. Both datasets have been significantly cleaned.
+
+```{r}
+## salaries
+library(tidyverse)
+library(viridis)
+library(tools)
+library(mgcv)
+
+D_salaries <- read_csv("salaries_data.csv")
+D_budget <- read_csv("budget_data.csv")
+```
+
+### EDA
+
+We're going to start with EDA, but before anything else, we need to split our data into training and testing sets.
+
+```{r}
+tr_in <- sample(1:nrow(D_salaries), nrow(D_salaries) * (2 / 3))
+D_salaries_tr <- D_salaries[tr_in, ]
+D_salaries_te <- D_salaries[-tr_in, ]
+```
+
+Please start by doing some exploratory data analysis. I'd like to see charts of the total salaries paid out by department by year, the total amount of overtime paid over time, the total amount of overtime paid by department by year, and the per-capita overtime paid by department per year. Write a quick sentence or two about what you see in the charts.
+
+I'd also like to know if there are any city employees who make a lot of money in overtime, and what departments they work for.
+
+colnames(D_salaries) \[1\] "lastName" "middleInitial" "firstName" "jobClass"\
+\[5\] "agencyName" "agencyID" "annualSalary" "grossPay"\
+\[9\] "hireDate" "fiscalYear" "ObjectId" "overtime"\
+\[13\] "years_employed" "rank"
+
+```{r}
+library(ggplot2)
+
+## total salaries paid out by department by year
+D_s_by_department_by_year <- D_salaries %>%
+    group_by(agencyName, fiscalYear) %>%
+    summarize(
+        department_salaries = sum(annualSalary)
+    )
+
+ggplot(data = D_s_by_department_by_year, aes(x = fiscalYear, y = department_salaries, color = agencyName)) +
+    geom_line() +
+    facet_wrap(~agencyName) +
+    theme_minimal() +
+    labs(title = "Small Multiples Chart", x = "Time", y = "Value")
+
+```
+
+```{r}
+
+# total amount of overtime paid over time
+D_overtime_overtime <- D_salaries %>%
+    group_by(fiscalYear) %>%
+    summarize(ot = sum(overtime))
+
+ggplot(data = D_overtime_overtime, aes(x = fiscalYear, y = ot)) +
+    geom_bar(stat = "identity") +
+    theme_minimal() +
+    labs(title = "total amount of overtime paid over time", x = "Fiscal Year", y = "Overtime")
+
+```
+
+```{r}
+# total amount of overtime paid by department by year
+D_overtime_by_dept_by_year <- D_salaries %>%
+    group_by(fiscalYear, agencyName) %>%
+    summarize(ot = sum(overtime))
+
+ggplot(data = D_overtime_by_dept_by_year) +
+    geom_line(aes(x = fiscalYear, y = ot, color = agencyName)) +
+    # facet_wrap(~agencyName) +
+    theme_minimal() +
+    labs(title = "total amount of overtime paid by department by year", x = "Fiscal Year", y = "Overtime", color = "Department")
+
+
+```
+
+```{r}
+# per-capita overtime paid by department per year
+D_per_overtime_by_dept_by_year <- D_salaries %>%
+    group_by(fiscalYear, agencyName) %>%
+    summarize(
+        ot = sum(overtime),
+        human = n(),
+        per_capita = ot / human
+    )
+
+
+ggplot(data = D_per_overtime_by_dept_by_year) +
+    geom_line(aes(x = fiscalYear, y = per_capita, color = agencyName)) +
+    facet_wrap(~agencyName) +
+    theme_minimal() +
+    labs(title = "total amount of overtime paid by department by year", x = "Fiscal Year", y = "Overtime per-capita", color = "Department")
+
+```
+
+### Modeling
+
+Now that you have a general idea of trends in the data, we want to see whether those trends hold when tested statistically.
+
+#### Grouping and joining data
+
+To do this, we need the mean overtime and salary by department, year, and number of years employed by the city. Use D_salaries to created a new dataframe D_mean_salary that contains that.
+
+Likewise, we want to create a new dataframe D_budget_s from D_budget that contains the total budget per agency per year.
+
+Finally, join those dataframes together by agency name and year to get a dataset D_salaries_and_budgets that we'll use for the model. Additionally, in our modeling, we're going to want to compare OT levels from the Police against every other department. Relevel the factor agencyName so that all contrasts are relative to Police.
+
+```{r}
+colnames(D_salaries_tr)
+```
+
+```{r}
+D_mean_salary_tr <- D_salaries_tr %>%
+    group_by(fiscalYear, agencyName, years_employed) %>%
+    summarise(
+        total_salaries = sum(annualSalary),
+        count = n(),
+        total_overtime = sum(overtime),
+        mean_salaries = total_salaries / count,
+        mean_overtime = total_overtime / count
+    )
+
+D_budget_s <- D_budget %>%
+    group_by(Year, agencyName) %>%
+    summarise(total_budget = sum(dollars)) %>%
+    rename(fiscalYear = Year)
+
+D_salaries_and_budgets_tr <- D_mean_salary_tr %>%
+    left_join(D_budget_s, by = c("agencyName", "fiscalYear"))
+
+D_salaries_and_budgets_tr$agencyName <- (D_salaries_and_budgets_tr$agencyName == "Police")
+```
+
+#### Model building, inference, diagnostics
+
+Now, we want you to estimate a model that allows you to say something about how overtime per capita has changed over time and by department. Please control for the number of years an employee has been employed and the total budget of a department. You'll notice the code below use bam instead of gam. This is because the data is a little larger than we usually work with, and bam is faster on large dataset
+
+```{r}
+mod_ot_y <- bam(mean_overtime ~ agencyName + s(fiscalYear) + s(years_employed) + s(total_budget),
+    data = D_salaries_and_budgets_tr,
+    family = nb()
+)
+
+mod_ot_police <- bam(mean_overtime ~ s(fiscalYear) + s(years_employed) + s(total_budget),
+    data = D_salaries_and_budgets_tr[D_salaries_and_budgets_tr$agencyName == TRUE, ],
+    family = nb()
+)
+
+
+```
+
+```{r}
+summary(mod_ot_police)
+```
+
+```{r}
+library(DHARMa)
+library(mgcv)
+library(mgcViz)
+library(boot)
+
+
+## partial effects plot go here
+# par(mfrow=c(2,3))
+# plot(mod_ot_y, trans = inv.logit, shift = coef(mod_ot_y)[1])
+
+# par(mfrow=c(2,3))
+# plot(mod_ot_police, trans = inv.logit, shift = coef(mod_ot_police)[1])
+
+# DHARMa residual analysis goes here
+# ot_res<-simulateResiduals(mod_ot_y)
+# plot(ot_res)
+
+police_res <- simulateResiduals(mod_ot_police)
+plot(police_res)
+```
+
+#### Fitting final model, inference, diagnostics
+
+Finally, based on the model you chose above. Re-run the model on the testing set, re-examine the diagnostics, make inferences based on the model, and tell us how your story changes.
+
+```{r}
+
+D_mean_salary_te <- D_salaries_te %>%
+    group_by(fiscalYear, agencyName, years_employed) %>%
+    summarise(
+        total_salaries = sum(annualSalary),
+        count = n(),
+        total_overtime = sum(overtime),
+        mean_salaries = total_salaries / count,
+        mean_overtime = total_overtime / count
+    )
+
+D_salaries_and_budgets_te <- D_mean_salary_te %>%
+    left_join(D_budget_s, by = c("agencyName", "fiscalYear"))
+
+D_salaries_and_budgets_te$agencyName <- (D_salaries_and_budgets_te$agencyName == "Police")
+
+p <- predict(mod_ot_y, D_salaries_and_budgets_te)
+```
